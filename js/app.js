@@ -18,7 +18,7 @@ function load() {
   return fresh();
 }
 let S = load();
-const save = () => store.set(KEY, JSON.stringify(S));
+const save = () => { store.set(KEY, JSON.stringify(S)); window.Cloud && Cloud.changed(); };
 const shuffle = (a) => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
 const esc = (s) => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
@@ -41,6 +41,7 @@ function pickBatch() {
 function grade(i, ok) {
   const s = S.q[i];
   s.n++;
+  s.t = Date.now(); // permite combinar el progreso entre dispositivos
   if (ok) s.b = s.b < 0 ? 2 : Math.min(5, s.b + 1);
   else { s.b = 0; s.w++; }
   s.d = S.round + INT[s.b];
@@ -232,6 +233,7 @@ function finish() {
     <ul class="list stagger">${list}</ul>
     <div class="actions"><button class="btn primary" id="rAgain">${exam ? 'Otro simulacro' : 'Siguiente tanda de 10'}</button><button class="btn ghost" id="rHome">Volver al inicio</button></div>`;
   r.querySelectorAll('.list button').forEach(b => b.onclick = () => openStudy(+b.dataset.i));
+  if (exam && window.Cloud) Cloud.saveExam(good, total);
   const mode = run.mode === 'errors' ? 'practice' : run.mode;
   $('rAgain').onclick = () => startRun(mode);
   $('rHome').onclick = () => { renderHome(true); show('home'); };
@@ -264,7 +266,10 @@ $('next').onclick = next;
 $('quit').onclick = () => {
   if (!run || confirm('¿Salir de la tanda? Lo que ya respondiste queda guardado.')) { run = null; renderHome(true); show('home'); }
 };
-$('reset').onclick = () => { if (confirm('¿Borrar todo tu progreso?')) { store.del(KEY); S = fresh(); renderHome(true); } };
+$('reset').onclick = () => {
+  const where = window.Cloud && Cloud.user ? ' en todos tus dispositivos' : '';
+  if (confirm(`¿Borrar todo tu progreso${where}?`)) { S = fresh(); S.resetAt = Date.now(); save(); renderHome(true); }
+};
 document.addEventListener('keydown', (e) => {
   if (!run || $('modal').open || e.metaKey || e.ctrlKey || e.altKey) return;
   const k = '1234'.indexOf(e.key) >= 0 ? '1234'.indexOf(e.key) : 'abcd'.indexOf(e.key.toLowerCase());
@@ -274,6 +279,139 @@ document.addEventListener('keydown', (e) => {
 
 renderHome(true);
 replay($('home'), 'view-enter');
+
+/* ---------- Cuenta y sincronización en la nube ---------- */
+const ICON_USER = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg>';
+const ICON_CLOUD = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18h10.5a4.5 4.5 0 0 0 .5-8.97A6 6 0 0 0 6.2 10 4 4 0 0 0 7 18z"/></svg>';
+const STATUS_TEXT = {
+  loading: 'Conectando…', out: 'Sin sesión', syncing: 'Sincronizando…', ok: 'Guardado en la nube',
+  offline: 'Sin conexión · se guardará al volver internet', error: 'No se pudo sincronizar',
+};
+function ago(d) {
+  if (!d) return '';
+  const s = Math.round((Date.now() - d) / 1000);
+  return s < 10 ? 'ahora mismo' : s < 60 ? `hace ${s} s` : s < 3600 ? `hace ${Math.round(s / 60)} min` : d.toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' });
+}
+
+function renderCloud(c) {
+  const btn = $('acct'), line = $('cloudLine');
+  btn.classList.toggle('hidden', !c.enabled);
+  line.classList.toggle('hidden', !c.enabled || c.status === 'loading');
+  if (!c.enabled) return;
+  btn.dataset.status = c.status;
+  btn.innerHTML = ICON_USER + '<i class="dot"></i>';
+  btn.setAttribute('aria-label', c.user ? `Tu cuenta (${c.user.email}) · ${STATUS_TEXT[c.status] || ''}` : 'Entrar o crear cuenta');
+  if (c.user) {
+    line.className = 'cloud-line in';
+    line.innerHTML = `${ICON_CLOUD}<span><b>${esc(STATUS_TEXT[c.status] || '')}</b> · ${esc(c.user.email)}</span>`;
+    line.onclick = openAccount;
+  } else {
+    line.className = 'cloud-line out';
+    line.innerHTML = `${ICON_CLOUD}<span><b>Guarda tu progreso en la nube.</b> Crea una cuenta gratis y sigue en cualquier celular o PC.</span><button class="btn ghost sm" type="button">Entrar</button>`;
+    line.onclick = openAccount;
+  }
+  if (c.recovery && !$('modal').open) openAccount();
+  if ($('modal').open && $('modalBody').dataset.view === 'account') refreshAccountStatus(c);
+}
+function refreshAccountStatus(c) {
+  const el = $('acctStatus');
+  if (el) el.innerHTML = `<i class="dot" data-status="${c.status}"></i>${esc(STATUS_TEXT[c.status] || '')}${c.lastSync && c.status === 'ok' ? ` · ${ago(c.lastSync)}` : ''}${c.error && c.status !== 'ok' ? `<small>${esc(c.error)}</small>` : ''}`;
+}
+
+let acctTab = 'in';
+function openAccount() {
+  const c = window.Cloud;
+  if (!c || !c.enabled) return;
+  const body = $('modalBody');
+  body.dataset.view = 'account';
+  const head = `<div class="mhead"><span class="tag">Tu cuenta</span><button class="close" id="mClose" aria-label="Cerrar">×</button></div>`;
+
+  if (c.user && c.recovery) {
+    body.innerHTML = `${head}<h2>Elige una contraseña nueva</h2>
+      <form class="form" id="pwForm"><label>Contraseña nueva<input type="password" name="pw" minlength="6" autocomplete="new-password" required></label>
+      <p class="form-msg" id="fMsg" role="alert"></p><button class="btn primary" type="submit">Guardar contraseña</button></form>`;
+    $('pwForm').onsubmit = async (e) => {
+      e.preventDefault();
+      const f = e.target, msg = $('fMsg'); f.querySelector('button').disabled = true;
+      try { await Cloud.updatePassword(f.pw.value); msg.className = 'form-msg ok'; msg.textContent = 'Contraseña actualizada.'; setTimeout(openAccount, 900); }
+      catch (err) { msg.className = 'form-msg bad'; msg.textContent = err.message; f.querySelector('button').disabled = false; }
+    };
+  } else if (c.user) {
+    body.innerHTML = `${head}
+      <div class="acct-id"><div class="avatar">${esc(c.user.email[0].toUpperCase())}</div><div><b>${esc(c.user.email)}</b><p class="acct-status" id="acctStatus"></p></div></div>
+      <p class="hint">Tu progreso se guarda solo después de cada respuesta. Entra con este correo en otro celular o PC y continuarás donde lo dejaste.</p>
+      <h2 style="margin-top:18px">Últimos simulacros</h2><ul class="exams" id="exams"><li class="muted small">Cargando…</li></ul>
+      <div class="actions"><button class="btn ghost" id="syncNow">Sincronizar ahora</button><button class="btn ghost" id="signOut">Cerrar sesión</button></div>`;
+    refreshAccountStatus(c);
+    $('syncNow').onclick = () => Cloud.syncNow();
+    $('signOut').onclick = async () => {
+      if (!confirm('¿Cerrar sesión? Tu progreso queda guardado en tu cuenta y este dispositivo vuelve a empezar desde cero.')) return;
+      await Cloud.signOut();
+      store.del(KEY); S = fresh(); renderHome(true);
+      $('modal').close();
+    };
+    Cloud.recentExams().then(list => {
+      $('exams').innerHTML = list.length ? list.map(x => {
+        const pass = x.total === EXAM && x.score >= PASS;
+        return `<li><span class="mk ${pass ? 'ok' : 'bad'}">${pass ? '✓' : '✗'}</span><b>${x.score}/${x.total}</b><span class="muted small">${new Date(x.created_at).toLocaleDateString('es', { day: 'numeric', month: 'short' })}</span></li>`;
+      }).join('') : '<li class="muted small">Aún no has hecho simulacros.</li>';
+    }).catch(err => { $('exams').innerHTML = `<li class="muted small">${esc(err.message)}</li>`; });
+  } else {
+    const isIn = acctTab === 'in';
+    body.innerHTML = `${head}
+      <div class="seg-ctl" role="tablist"><button role="tab" aria-selected="${isIn}" data-tab="in">Entrar</button><button role="tab" aria-selected="${!isIn}" data-tab="up">Crear cuenta</button></div>
+      <form class="form" id="authForm" novalidate>
+        <label>Correo<input type="email" name="email" autocomplete="email" inputmode="email" autocapitalize="off" spellcheck="false" required></label>
+        <label>Contraseña<input type="password" name="pw" minlength="6" autocomplete="${isIn ? 'current-password' : 'new-password'}" required>
+          ${isIn ? '' : '<span class="field-hint">Mínimo 6 caracteres.</span>'}</label>
+        <p class="form-msg" id="fMsg" role="alert"></p>
+        <button class="btn primary" type="submit">${isIn ? 'Entrar' : 'Crear cuenta'}</button>
+        ${isIn ? '<button class="linkish" type="button" id="forgot">¿Olvidaste tu contraseña?</button>' : ''}
+      </form>
+      <p class="hint small">Lo que ya respondiste en este dispositivo se suma a tu cuenta al entrar.</p>`;
+    body.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { acctTab = b.dataset.tab; openAccount(); });
+    const form = $('authForm'), msg = $('fMsg');
+    const say = (t, ok = false) => { msg.className = 'form-msg ' + (ok ? 'ok' : 'bad'); msg.textContent = t; };
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const email = form.email.value, pw = form.pw.value;
+      if (!/^\S+@\S+\.\S+$/.test(email.trim())) return say('Escribe un correo válido.');
+      if (pw.length < 6) return say('La contraseña debe tener al menos 6 caracteres.');
+      const btn = form.querySelector('button[type=submit]'); btn.disabled = true; say('');
+      try {
+        if (isIn) { await Cloud.signIn(email, pw); $('modal').close(); }
+        else {
+          const r = await Cloud.signUp(email, pw);
+          if (r.needsConfirm) say('Te enviamos un correo para confirmar la cuenta. Ábrelo y luego entra aquí.', true);
+          else $('modal').close();
+        }
+      } catch (err) { say(err.message); }
+      btn.disabled = false;
+    };
+    if ($('forgot')) $('forgot').onclick = async () => {
+      const email = form.email.value;
+      if (!/^\S+@\S+\.\S+$/.test(email.trim())) return say('Escribe tu correo arriba y vuelve a tocar «¿Olvidaste tu contraseña?».');
+      try { await Cloud.resetPassword(email); say('Te enviamos un enlace para crear una contraseña nueva.', true); } catch (err) { say(err.message); }
+    };
+  }
+  $('mClose').onclick = () => $('modal').close();
+  if (!$('modal').open) $('modal').showModal();
+}
+$('modal').addEventListener('close', () => { delete $('modalBody').dataset.view; });
+$('acct').onclick = openAccount;
+
+if (window.Cloud) {
+  Cloud.on(renderCloud);
+  Cloud.init({
+    getState: () => S,
+    setState: (next) => {
+      if (!next || !Array.isArray(next.q) || next.q.length !== N) return;
+      S = next;
+      store.set(KEY, JSON.stringify(S));
+      if (!run) renderHome();
+    },
+  });
+}
 
 /* ---------- Uso sin conexión (al instalarla en la pantalla de inicio) ---------- */
 if ('serviceWorker' in navigator && location.protocol === 'https:' && window.self === window.top) {

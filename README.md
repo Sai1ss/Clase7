@@ -12,7 +12,9 @@ App web para practicar las **108 preguntas** del examen teórico de la licencia 
 - **Mapa de progreso.** Las 108 preguntas en colores; tocando una ves su ficha de estudio.
 - **Tema claro y oscuro**, y se puede usar sin conexión una vez instalada.
 
-El progreso se guarda en el navegador de cada persona. No hay servidor ni datos compartidos.
+- **Cuenta opcional con progreso en la nube.** Con correo y contraseña, el progreso y los simulacros se guardan en una base de datos (Supabase) y se puede seguir en cualquier celular o PC. Sin cuenta, todo se guarda en el navegador.
+
+La configuración de la base de datos está explicada paso a paso en [docs/BASE_DE_DATOS.md](docs/BASE_DE_DATOS.md).
 
 ## Instalarla en el celular
 
@@ -30,10 +32,22 @@ index.html            página y estructura
 css/styles.css        diseño, temas claro/oscuro y animaciones
 js/questions.js       las 108 preguntas, respuestas y explicaciones
 js/scenes.js          ilustraciones SVG de las preguntas sin imagen
-js/app.js             algoritmo de repaso, simulacro y mapa
+js/app.js             algoritmo de repaso, simulacro, mapa y pantalla de cuenta
+js/config.js          URL y clave pública de Supabase (vacías = solo modo local)
+js/cloud.js           inicio de sesión y sincronización del progreso
+supabase/schema.sql   tablas y reglas de seguridad de la base de datos
+.github/workflows/    tarea que evita que Supabase se pause por inactividad
 img/                  señales recortadas del PDF (qNNN.jpg = pregunta NNN)
 icons/, manifest.webmanifest, sw.js   instalación como app y uso sin conexión
 ```
+
+## Infraestructura
+
+| Pieza | Servicio | Costo |
+|---|---|---|
+| Web (HTML/CSS/JS) | GitHub Pages | Gratis |
+| Cuentas y base de datos | Supabase (Postgres + Auth) | Gratis (500 MB, 50 000 usuarios/mes) |
+| Mantener la base activa | GitHub Actions | Gratis |
 
 ## Publicación
 
