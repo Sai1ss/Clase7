@@ -13,11 +13,22 @@ const store = {
   del(k) { try { localStorage.removeItem(k); } catch (e) {} },
 };
 const fresh = () => ({ round: 0, q: Q.map(() => ({ b: -1, n: 0, w: 0, d: 0 })) });
+const OLD_KEY = 'clase7-progreso-v1'; // formato de la primera versión: { rounds, q: [{ shown, wrong, last }] }
 function load() {
   try { const s = JSON.parse(store.get(KEY)); if (s && Array.isArray(s.q) && s.q.length === N) return s; } catch (e) {}
+  try {
+    const o = JSON.parse(store.get(OLD_KEY));
+    if (o && Array.isArray(o.q) && o.q.length === N) {
+      const s = { round: o.rounds || 0, q: o.q.map(x => x && x.shown ? { b: x.last ? 2 : 0, n: x.shown, w: x.wrong || 0, d: 0 } : { b: -1, n: 0, w: 0, d: 0 }) };
+      store.set(KEY, JSON.stringify(s));
+      return s;
+    }
+  } catch (e) {}
   return fresh();
 }
 let S = load();
+// Pide al navegador que no borre estos datos por falta de espacio o inactividad.
+try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch (e) {}
 const save = () => { store.set(KEY, JSON.stringify(S)); window.Cloud && Cloud.changed(); };
 const shuffle = (a) => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
 const esc = (s) => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -230,9 +241,11 @@ function finish() {
   const list = order.map((i, k) => `<li style="--i:${k}"><button data-i="${i}"><span class="mk ${run.first.get(i) ? 'ok' : 'bad'}">${run.first.get(i) ? '✓' : '✗'}</span><span><b>#${i + 1}</b> ${esc(Q[i].q)}<small>${esc(Q[i].o[Q[i].a])}</small></span></button></li>`).join('');
   const r = $('result');
   r.innerHTML = `<h2>${exam ? 'Resultado del simulacro' : 'Tanda terminada'}</h2>${head}
+    ${window.Cloud && Cloud.user ? '' : '<button class="cloud-line out" id="rBackup" type="button" style="width:100%;text-align:left"><span>💾 <b>Guarda tu enlace de progreso</b> para no perder tu avance si se borran los datos del navegador.</span></button>'}
     <ul class="list stagger">${list}</ul>
     <div class="actions"><button class="btn primary" id="rAgain">${exam ? 'Otro simulacro' : 'Siguiente tanda de 10'}</button><button class="btn ghost" id="rHome">Volver al inicio</button></div>`;
   r.querySelectorAll('.list button').forEach(b => b.onclick = () => openStudy(+b.dataset.i));
+  if ($('rBackup')) $('rBackup').onclick = shareProgress;
   if (exam && window.Cloud) Cloud.saveExam(good, total);
   const mode = run.mode === 'errors' ? 'practice' : run.mode;
   $('rAgain').onclick = () => startRun(mode);
@@ -279,6 +292,109 @@ document.addEventListener('keydown', (e) => {
 
 renderHome(true);
 replay($('home'), 'view-enter');
+
+/* ---------- Enlace de progreso (respaldo y paso a otro dispositivo, sin cuenta) ----------
+   Formato: base64url de [versión=1, ronda (2 bytes), y por pregunta: caja+1, veces, fallos, repaso relativo+128]. */
+const APP_URL = 'https://sai1ss.github.io/Clase7/';
+const b64u = {
+  enc: (bytes) => btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
+  dec: (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0)),
+};
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+function exportCode() {
+  const r = clamp(S.round, 0, 65535), out = [1, r >> 8, r & 255];
+  S.q.forEach(s => out.push(s.b + 1, clamp(s.n, 0, 255), clamp(s.w, 0, 255), clamp(s.d - S.round + 128, 0, 255)));
+  return b64u.enc(out);
+}
+function decodeCode(text) {
+  const m = String(text).match(/[#&?]p=([A-Za-z0-9_-]+)/) || String(text).trim().match(/^([A-Za-z0-9_-]{100,})$/);
+  if (!m) throw new Error('No reconozco ese enlace o código.');
+  let by; try { by = b64u.dec(m[1]); } catch (e) { throw new Error('El código está incompleto o dañado.'); }
+  if (by[0] !== 1 || by.length !== 3 + N * 4) throw new Error('El código está incompleto o dañado.');
+  const round = (by[1] << 8) | by[2];
+  return {
+    round,
+    q: Q.map((_, i) => {
+      const o = 3 + i * 4, b = by[o] - 1;
+      return b < 0 || b > 5 ? { b: -1, n: 0, w: 0, d: 0 } : { b, n: by[o + 1], w: by[o + 2], d: round + by[o + 3] - 128 };
+    }),
+  };
+}
+// Combina con lo de este dispositivo: por pregunta se queda con la que tenga más práctica.
+function combine(local, inc) {
+  const round = Math.max(local.round, inc.round), now = Date.now();
+  return {
+    round, resetAt: local.resetAt,
+    q: local.q.map((x, i) => {
+      const y = inc.q[i];
+      if (y.n > x.n || (y.n === x.n && y.b > x.b)) return { ...y, d: y.d - inc.round + round, t: now };
+      return { ...x, d: x.d - local.round + round };
+    }),
+  };
+}
+const summary = (st) => {
+  const seen = st.q.filter(s => s.b >= 0).length, mast = st.q.filter(s => s.b >= 3).length;
+  return { seen, mast };
+};
+async function shareProgress() {
+  const url = `${APP_URL}#p=${exportCode()}`, { seen, mast } = summary(S);
+  const text = `Mi progreso del cuestionario Clase 7 (${seen}/${N} vistas, ${mast} dominadas). Ábrelo para cargarlo:`;
+  if (navigator.share) {
+    try { await navigator.share({ title: 'Mi progreso · Clase 7', text, url }); return; }
+    catch (e) { if (e && e.name === 'AbortError') return; }
+  }
+  let copied = false;
+  try { await navigator.clipboard.writeText(url); copied = true; } catch (e) {}
+  const body = $('modalBody'); body.dataset.view = 'share';
+  body.innerHTML = `<div class="mhead"><span class="tag">Enlace de progreso</span><button class="close" id="mClose" aria-label="Cerrar">×</button></div>
+    <h2>${copied ? '✓ Enlace copiado' : 'Copia este enlace'}</h2>
+    <p class="hint" style="margin-top:0">Guárdalo donde no se pierda (WhatsApp, notas, correo). Al abrirlo en cualquier celular o PC se carga tu avance: ${seen}/${N} vistas, ${mast} dominadas.</p>
+    <textarea class="code" readonly rows="4">${esc(url)}</textarea>
+    <div class="actions"><button class="btn primary" id="copyAgain">Copiar enlace</button></div>`;
+  const ta = body.querySelector('textarea');
+  $('copyAgain').onclick = async () => { ta.select(); try { await navigator.clipboard.writeText(url); } catch (e) { document.execCommand('copy'); } $('copyAgain').textContent = '✓ Copiado'; };
+  $('mClose').onclick = () => $('modal').close();
+  if (!$('modal').open) $('modal').showModal();
+  ta.focus(); ta.select();
+}
+function openImport(prefill = '') {
+  const body = $('modalBody'); body.dataset.view = 'import';
+  let inc = null;
+  body.innerHTML = `<div class="mhead"><span class="tag">Cargar progreso</span><button class="close" id="mClose" aria-label="Cerrar">×</button></div>
+    <h2>Pega tu enlace o código de progreso</h2>
+    <textarea class="code" id="impText" rows="4" placeholder="https://sai1ss.github.io/Clase7/#p=…" spellcheck="false" autocapitalize="off">${esc(prefill)}</textarea>
+    <p class="form-msg" id="impMsg" role="alert"></p>
+    <div class="actions"><button class="btn primary" id="impGo" disabled>Cargar en este dispositivo</button></div>
+    <p class="hint small">Se combina con lo que ya tengas aquí: de cada pregunta se conserva el registro con más práctica. No se pierde nada.</p>`;
+  const ta = $('impText'), msg = $('impMsg'), go = $('impGo');
+  const check = () => {
+    inc = null; go.disabled = true; msg.className = 'form-msg'; msg.textContent = '';
+    if (!ta.value.trim()) return;
+    try {
+      inc = decodeCode(ta.value);
+      const a = summary(inc);
+      msg.className = 'form-msg ok'; msg.textContent = `Progreso encontrado: ${a.seen}/${N} vistas, ${a.mast} dominadas.`;
+      go.disabled = false;
+    } catch (e) { msg.className = 'form-msg bad'; msg.textContent = e.message; }
+  };
+  ta.oninput = check; check();
+  go.onclick = () => {
+    if (!inc) return;
+    S = combine(S, inc); save();
+    $('modal').close();
+    renderHome(true); show('home');
+  };
+  $('mClose').onclick = () => $('modal').close();
+  if (!$('modal').open) $('modal').showModal();
+}
+$('shareProg').onclick = shareProgress;
+$('loadProg').onclick = () => openImport();
+// Abrir la app desde un enlace de progreso (…/Clase7/#p=…)
+if (/[#&]p=/.test(location.hash)) {
+  const link = location.hash;
+  history.replaceState(null, '', location.pathname + location.search);
+  setTimeout(() => openImport(link), 450);
+}
 
 /* ---------- Cuenta y sincronización en la nube ---------- */
 const ICON_USER = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg>';
